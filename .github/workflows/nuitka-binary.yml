@@ -1,0 +1,538 @@
+name: Build Nuitka Binary
+
+# Builds standalone Nuitka binaries of flowlyai for macOS ARM64, macOS Intel
+# (x86_64), Linux x64/ARM64, and Windows x64. Triggered manually via
+# workflow_dispatch, or on version tags.
+#
+# Artifacts land in:
+#   - flowlyai-macos-arm64.tar.gz  (native Apple Silicon runner)
+#   - flowlyai-macos-x64.tar.gz    (native Intel runner, macos-15-intel)
+#   - flowlyai-linux-x64.tar.gz    (native Linux x64 runner)
+#   - flowlyai-linux-arm64.tar.gz  (native Linux ARM64 runner)
+#   - flowlyai-windows-x64.zip     (native Windows x64 runner, windows-latest)
+#
+# After a successful run, download the appropriate artifact and run the
+# matching build script from flowly-desktop:
+#   - macOS:   ./scripts/build-mac.sh
+#   - Windows: .\scripts\build-win.ps1
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_windows:
+        description: "Skip the Windows x64 build"
+        type: boolean
+        default: false
+      skip_linux:
+        description: "Skip the Linux x64/ARM64 builds"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-15 = free Apple Silicon (arm64). Standard runner, unlimited
+          # free minutes on public repos.
+          - arch: arm64
+            runner: macos-15
+            output_dir: build3
+          # macos-15-intel = free Intel (x86_64) runner. Replaced the retired
+          # macos-13 image (December 2025). Standard runner, unlimited free
+          # minutes on public repos. 4 cores / 14 GB RAM. Note: Apple + GitHub
+          # plan to remove all Intel macOS runners by Fall 2027, after which
+          # we'll need a self-hosted Intel Mac or third-party CI (Cirrus).
+          - arch: x64
+            runner: macos-15-intel
+            output_dir: build-x64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out flowlyai
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify architecture
+        run: |
+          echo "uname -m: $(uname -m)"
+          echo "arch: $(arch)"
+          python -c "import platform; print('platform:', platform.machine())"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install flowly dependencies
+        run: |
+          uv sync
+          # Pinned below 4.0: Nuitka 4.1.1 produces a standalone binary that
+          # tries to execvp `python3` from its own dist folder at runtime, but
+          # does not bundle that interpreter — smoke test breaks. The May 4 /
+          # May 8 builds succeeded on an older series; staying on <4.0 keeps
+          # the bundled-interpreter behaviour we rely on.
+          uv pip install "nuitka<4.0"
+
+      - name: Cache Nuitka ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Nuitka
+          key: nuitka-ccache-${{ matrix.arch }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            nuitka-ccache-${{ matrix.arch }}-
+
+      - name: Build Nuitka standalone binary
+        run: |
+          uv run python -m nuitka \
+            --standalone \
+            --output-dir=${{ matrix.output_dir }} \
+            --assume-yes-for-downloads \
+            --include-package=flowly \
+            --include-package=openai \
+            --include-package=pydantic \
+            --include-package=aiohttp \
+            --include-package=typer \
+            --include-package=rich \
+            --include-package=loguru \
+            --include-package=croniter \
+            --include-package=telegram \
+            --include-package=slack_sdk \
+            --include-package=starlette \
+            --include-package=uvicorn \
+            --include-package=websockets \
+            --include-package=websocket \
+            --include-package=readability \
+            --include-package=fitz \
+            --include-package=docx \
+            --include-package=openpyxl \
+            --include-package=pptx \
+            --include-package=PIL \
+            --include-package=InquirerPy \
+            --include-package=pyngrok \
+            --include-package=jose \
+            --include-package=mcp \
+            --include-package=anyio \
+            --include-module=anyio._backends._asyncio \
+            --include-package=jsonschema \
+            --include-package=jsonschema_specifications \
+            --include-package-data=jsonschema_specifications \
+            --include-package=referencing \
+            --include-package=rpds \
+            --include-package=httpx_sse \
+            --include-package=sse_starlette \
+            --include-distribution-metadata=mcp \
+            --include-package=textual \
+            --include-package=keyring \
+            --include-package=keyring.backends \
+            --include-package-data=tiktoken_ext \
+            --include-package-data=textual \
+            --include-package-data=flowly \
+            --include-data-dir=flowly/mcp_catalog=flowly/mcp_catalog \
+            --include-data-dir=flowly/plugins_bundled=flowly/plugins_bundled \
+            --include-data-files=flowly/plugins_bundled/disk-cleanup/*.py=flowly/plugins_bundled/disk-cleanup/ \
+            --nofollow-import-to=pytest \
+            --nofollow-import-to=nuitka \
+            flowly/cli/entry.py
+
+      - name: Verify binary architecture
+        run: |
+          BIN="${{ matrix.output_dir }}/entry.dist/entry.bin"
+          file "$BIN"
+          case "${{ matrix.arch }}" in
+            arm64)
+              file "$BIN" | grep -q "arm64" || (echo "ERROR: expected arm64 binary" && exit 1)
+              ;;
+            x64)
+              file "$BIN" | grep -q "x86_64" || (echo "ERROR: expected x86_64 binary" && exit 1)
+              ;;
+          esac
+
+      - name: Inspect dist folder
+        # Diagnostic: lists what Nuitka actually bundled. If a future smoke
+        # test fails the way the 2026-05-20 run did ("execvp() of
+        # entry.dist/python3 failed"), the log makes it obvious whether the
+        # interpreter shim is missing vs. some other regression.
+        run: |
+          DIST="${{ matrix.output_dir }}/entry.dist"
+          echo "=== top-level entries ==="
+          ls -la "$DIST" | head -40
+          echo ""
+          echo "=== python-shaped files ==="
+          ls -la "$DIST" | grep -iE 'python|entry' || echo "(none matched)"
+
+      - name: Smoke test binary
+        run: |
+          BIN="${{ matrix.output_dir }}/entry.dist/entry.bin"
+          "$BIN" --version
+
+      - name: Print binary size
+        run: |
+          du -sh ${{ matrix.output_dir }}/entry.dist/
+          du -sh ${{ matrix.output_dir }}/entry.dist/entry.bin
+
+      - name: Package dist as tarball
+        run: |
+          cd ${{ matrix.output_dir }}
+          tar -czf ../flowlyai-macos-${{ matrix.arch }}.tar.gz entry.dist
+          cd ..
+          ls -lh flowlyai-macos-${{ matrix.arch }}.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowlyai-macos-${{ matrix.arch }}
+          path: flowlyai-macos-${{ matrix.arch }}.tar.gz
+          retention-days: 30
+          compression-level: 0  # Already gzipped
+
+  # ---------------------------------------------------------------------------
+  # Windows x64 — separate job because the shell syntax, packaging tool and
+  # binary extension all diverge from the Unix runners. Kept entirely isolated
+  # so a Windows failure never affects the macOS builds and vice versa.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    # Skip when a manual run explicitly requests macOS-only builds.
+    # Tag pushes still run every platform — release cut should always
+    # ship the full matrix.
+    if: github.event_name != 'workflow_dispatch' || inputs.skip_windows != true
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out flowlyai
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify architecture
+        shell: pwsh
+        run: |
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "Arch: $env:PROCESSOR_ARCHITECTURE"
+          python -c "import platform; print('platform:', platform.machine())"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install flowly dependencies
+        shell: pwsh
+        run: |
+          uv sync
+          uv pip install nuitka
+
+      - name: Cache Nuitka ccache
+        uses: actions/cache@v4
+        with:
+          # Nuitka on Windows stores its ccache under %LOCALAPPDATA%\Nuitka\Nuitka\Cache
+          path: ~\AppData\Local\Nuitka\Nuitka\Cache
+          key: nuitka-ccache-windows-x64-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            nuitka-ccache-windows-x64-
+
+      - name: Build Nuitka standalone binary
+        shell: pwsh
+        # --jobs=4 uses all cores on windows-latest (4-core runner). Without
+        # this Scons serialises MSVC and the Scons step can hang for 60+ min.
+        # --lto=no skips link-time optimization: binary is ~5-10% larger but
+        # linking finishes in minutes instead of tens of minutes.
+        # fitz (PyMuPDF) excluded on Windows: its MuPDF C binding is a single
+        # 2.1M-line translation unit that blows past MSVC's compiler heap
+        # (fatal error C1002). flowly/agent/context.py already wraps the
+        # pymupdf import in try/ImportError and falls back to pdfminer; the
+        # only user-visible effect is that Windows users who want PDF text
+        # extraction need to `pip install pymupdf` into their install.
+        run: |
+          uv run python -m nuitka `
+            --standalone `
+            --output-dir=build-win `
+            --assume-yes-for-downloads `
+            --msvc=latest `
+            --windows-console-mode=force `
+            --jobs=4 `
+            --lto=no `
+            --include-package=flowly `
+            --include-package=openai `
+            --include-package=pydantic `
+            --include-package=aiohttp `
+            --include-package=typer `
+            --include-package=rich `
+            --include-package=loguru `
+            --include-package=croniter `
+            --include-package=telegram `
+            --include-package=slack_sdk `
+            --include-package=starlette `
+            --include-package=uvicorn `
+            --include-package=websockets `
+            --include-package=websocket `
+            --include-package=readability `
+            --include-package=docx `
+            --include-package=openpyxl `
+            --include-package=pptx `
+            --include-package=PIL `
+            --include-package=InquirerPy `
+            --include-package=pyngrok `
+            --include-package=jose `
+            --include-package=mcp `
+            --include-package=anyio `
+            --include-module=anyio._backends._asyncio `
+            --include-package=jsonschema `
+            --include-package=jsonschema_specifications `
+            --include-package-data=jsonschema_specifications `
+            --include-package=referencing `
+            --include-package=rpds `
+            --include-package=httpx_sse `
+            --include-package=sse_starlette `
+            --include-distribution-metadata=mcp `
+            --include-package=textual `
+            --include-package=keyring `
+            --include-package=keyring.backends `
+            --include-package-data=tiktoken_ext `
+            --include-package-data=textual `
+            --include-package-data=flowly `
+            --include-data-dir=flowly/mcp_catalog=flowly/mcp_catalog `
+            --include-data-dir=flowly/plugins_bundled=flowly/plugins_bundled `
+            --include-data-files=flowly/plugins_bundled/disk-cleanup/*.py=flowly/plugins_bundled/disk-cleanup/ `
+            --nofollow-import-to=pytest `
+            --nofollow-import-to=nuitka `
+            --nofollow-import-to=fitz `
+            --nofollow-import-to=pymupdf `
+            flowly/cli/entry.py
+
+      - name: Verify binary exists
+        shell: pwsh
+        run: |
+          $bin = "build-win\entry.dist\entry.exe"
+          if (-not (Test-Path $bin)) {
+            throw "entry.exe not produced at $bin"
+          }
+          $info = Get-Item $bin
+          Write-Host "Binary: $($info.FullName) ($([math]::Round($info.Length / 1MB, 2)) MB)"
+
+      - name: Smoke test binary
+        shell: pwsh
+        run: |
+          .\build-win\entry.dist\entry.exe --version
+
+      - name: Print dist size
+        shell: pwsh
+        run: |
+          $distSize = (Get-ChildItem -Recurse build-win\entry.dist | Measure-Object -Property Length -Sum).Sum
+          Write-Host "entry.dist total: $([math]::Round($distSize / 1MB, 1)) MB"
+
+      # Rename entry.exe -> flowly-bin.exe so the artifact matches the name
+      # bundled-runtime.ts expects on Windows, and build-win.ps1 does not need
+      # to rename it again.
+      - name: Normalize binary name
+        shell: pwsh
+        run: |
+          Move-Item build-win\entry.dist\entry.exe build-win\entry.dist\flowly-bin.exe
+
+      - name: Package dist as zip
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path build-win\entry.dist `
+            -DestinationPath flowlyai-windows-x64.zip `
+            -CompressionLevel Optimal
+          Get-Item flowlyai-windows-x64.zip | Select-Object Name, @{N='Size(MB)';E={[math]::Round($_.Length/1MB, 1)}}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowlyai-windows-x64
+          path: flowlyai-windows-x64.zip
+          retention-days: 30
+          compression-level: 0  # Already compressed
+
+  # ---------------------------------------------------------------------------
+  # Linux x64 + ARM64 — native runners only. The artifacts are consumed by the
+  # standalone CLI installer and, later, the Linux desktop AppImage/.deb build.
+  # ---------------------------------------------------------------------------
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+            output_dir: build-linux-x64
+            file_arch_pattern: "x86-64|x86_64"
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            output_dir: build-linux-arm64
+            file_arch_pattern: "aarch64|ARM aarch64"
+
+    # Same opt-out pattern the Windows job uses — workflow_dispatch
+    # with ``skip_linux: true`` removes the Linux matrix entirely so
+    # an iterative macOS-only smoke test doesn't burn ~50 free CI
+    # minutes on builds the user isn't testing.
+    if: github.event_name != 'workflow_dispatch' || inputs.skip_linux != true
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out flowlyai
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify architecture
+        run: |
+          echo "uname -m: $(uname -m)"
+          python -c "import platform; print('platform:', platform.machine())"
+
+      - name: Install system build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential patchelf ccache
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install flowly dependencies
+        run: |
+          uv sync
+          uv pip install "nuitka<4.0"
+
+      - name: Cache Nuitka ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Nuitka
+          key: nuitka-ccache-linux-${{ matrix.arch }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            nuitka-ccache-linux-${{ matrix.arch }}-
+
+      - name: Build Nuitka standalone binary
+        run: |
+          uv run python -m nuitka \
+            --standalone \
+            --output-dir=${{ matrix.output_dir }} \
+            --assume-yes-for-downloads \
+            --include-package=flowly \
+            --include-package=openai \
+            --include-package=pydantic \
+            --include-package=aiohttp \
+            --include-package=typer \
+            --include-package=rich \
+            --include-package=loguru \
+            --include-package=croniter \
+            --include-package=telegram \
+            --include-package=slack_sdk \
+            --include-package=starlette \
+            --include-package=uvicorn \
+            --include-package=websockets \
+            --include-package=websocket \
+            --include-package=readability \
+            --include-package=fitz \
+            --include-package=docx \
+            --include-package=openpyxl \
+            --include-package=pptx \
+            --include-package=PIL \
+            --include-package=InquirerPy \
+            --include-package=pyngrok \
+            --include-package=jose \
+            --include-package=textual \
+            --include-package=keyring \
+            --include-package=keyring.backends \
+            --include-package-data=tiktoken_ext \
+            --include-package-data=textual \
+            --include-package-data=flowly \
+            --include-data-dir=flowly/plugins_bundled=flowly/plugins_bundled \
+            --include-data-files=flowly/plugins_bundled/disk-cleanup/*.py=flowly/plugins_bundled/disk-cleanup/ \
+            --nofollow-import-to=pytest \
+            --nofollow-import-to=nuitka \
+            flowly/cli/entry.py
+
+      - name: Verify binary architecture
+        run: |
+          BIN="${{ matrix.output_dir }}/entry.dist/entry.bin"
+          file "$BIN"
+          file "$BIN" | grep -Eq "${{ matrix.file_arch_pattern }}" || {
+            echo "ERROR: binary architecture does not match ${{ matrix.arch }}"
+            exit 1
+          }
+
+      - name: Smoke test binary
+        run: |
+          BIN="${{ matrix.output_dir }}/entry.dist/entry.bin"
+          "$BIN" --version
+
+      - name: Print binary size
+        run: |
+          du -sh ${{ matrix.output_dir }}/entry.dist/
+          du -sh ${{ matrix.output_dir }}/entry.dist/entry.bin
+
+      - name: Package dist as tarball
+        run: |
+          cd ${{ matrix.output_dir }}
+          tar -czf ../flowlyai-linux-${{ matrix.arch }}.tar.gz entry.dist
+          cd ..
+          ls -lh flowlyai-linux-${{ matrix.arch }}.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowlyai-linux-${{ matrix.arch }}
+          path: flowlyai-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 30
+          compression-level: 0  # Already gzipped
+
+  # ---------------------------------------------------------------------------
+  # Release — attach all Nuitka binaries to a GitHub Release whenever a
+  # version tag (v*) is pushed. workflow_dispatch runs do NOT create releases,
+  # only keep artifacts (30-day retention). Kept isolated: if this fails, the
+  # build jobs still succeeded and artifacts remain available.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [build, build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Needed to create the Release
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List downloaded artifacts
+        run: |
+          find artifacts/ -type f -printf '%p (%s bytes)\n'
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/flowlyai-macos-arm64/flowlyai-macos-arm64.tar.gz
+            artifacts/flowlyai-macos-x64/flowlyai-macos-x64.tar.gz
+            artifacts/flowlyai-linux-x64/flowlyai-linux-x64.tar.gz
+            artifacts/flowlyai-linux-arm64/flowlyai-linux-arm64.tar.gz
+            artifacts/flowlyai-windows-x64/flowlyai-windows-x64.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
