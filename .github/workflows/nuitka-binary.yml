@@ -57,12 +57,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
-      - name: Check out flowlyai (from the PUBLIC source repo)
+      - name: Check out the public source (Nocetic/flowly)
         uses: actions/checkout@v4
         with:
-          repository: hakansoren/flowlyai
+          repository: Nocetic/flowly
           ref: main
-          token: ${{ secrets.GH_PAT }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -216,12 +215,11 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Check out flowlyai (from the PUBLIC source repo)
+      - name: Check out the public source (Nocetic/flowly)
         uses: actions/checkout@v4
         with:
-          repository: hakansoren/flowlyai
+          repository: Nocetic/flowly
           ref: main
-          token: ${{ secrets.GH_PAT }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -398,12 +396,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
-      - name: Check out flowlyai (from the PUBLIC source repo)
+      - name: Check out the public source (Nocetic/flowly)
         uses: actions/checkout@v4
         with:
-          repository: hakansoren/flowlyai
+          repository: Nocetic/flowly
           ref: main
-          token: ${{ secrets.GH_PAT }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
