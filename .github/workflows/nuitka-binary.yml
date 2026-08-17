@@ -99,6 +99,12 @@ jobs:
             nuitka-ccache-${{ matrix.arch }}-
 
       - name: Build Nuitka standalone binary
+        env:
+          # Intel macOS: onnxruntime ships no x86_64 wheels, so uv sync skips
+          # the optional fastembed runtime there. This tells entry.py's
+          # nuitka-project-if block to drop the semantic-routing includes —
+          # semantic_runtime_available() in flowly handles the absence.
+          FLOWLY_NUITKA_NO_SEMANTIC: ${{ matrix.arch == 'x64' && '1' || '0' }}
         run: |
           uv run python -m nuitka \
             --standalone \
