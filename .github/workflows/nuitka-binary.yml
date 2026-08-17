@@ -90,6 +90,28 @@ jobs:
           # the bundled-interpreter behaviour we rely on.
           uv pip install "nuitka<4.0"
 
+      - name: Repair onnxruntime dylib layout for Nuitka
+        # macOS wheels cannot carry symlinks, so libonnxruntime.<major>.dylib —
+        # the install name the versioned dylib references via @rpath — is
+        # missing on disk, and Nuitka's dll-files collection aborts on it.
+        # Recreate the link before compiling. No-op where onnxruntime is not
+        # installed (Intel macOS skips the optional semantic runtime).
+        run: |
+          uv run python - <<'PY'
+          import glob, os
+          try:
+              import onnxruntime
+          except ImportError:
+              raise SystemExit(0)
+          capi = os.path.join(os.path.dirname(onnxruntime.__file__), "capi")
+          for versioned in sorted(glob.glob(os.path.join(capi, "libonnxruntime.*.*.dylib"))):
+              base = os.path.basename(versioned)
+              link = os.path.join(capi, "libonnxruntime.%s.dylib" % base.split(".")[1])
+              if not os.path.exists(link):
+                  os.symlink(base, link)
+                  print("linked", link, "->", base)
+          PY
+
       - name: Cache Nuitka ccache
         uses: actions/cache@v4
         with:
