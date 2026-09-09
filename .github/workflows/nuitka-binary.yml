@@ -154,7 +154,7 @@ jobs:
             --include-package=PIL \
             --include-package=InquirerPy \
             --include-package=pyngrok \
-            --include-package=jose \
+            --include-package=jwt \
             --include-package=mcp \
             --include-package=anyio \
             --include-module=anyio._backends._asyncio \
@@ -324,7 +324,7 @@ jobs:
             --include-package=PIL `
             --include-package=InquirerPy `
             --include-package=pyngrok `
-            --include-package=jose `
+            --include-package=jwt `
             --include-package=mcp `
             --include-package=anyio `
             --include-module=anyio._backends._asyncio `
@@ -492,7 +492,7 @@ jobs:
             --include-package=PIL \
             --include-package=InquirerPy \
             --include-package=pyngrok \
-            --include-package=jose \
+            --include-package=jwt \
             --include-package=textual \
             --include-package=keyring \
             --include-package=keyring.backends \
