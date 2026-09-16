@@ -108,9 +108,56 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install locked flowly and Nuitka dependencies
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
         run: |
-          uv sync --locked --group nuitka
+          if [[ "$BUILD_ARCH" == "x64" ]]; then
+            # cryptography 50 has no Intel macOS wheel. Its default source
+            # build links Homebrew OpenSSL dynamically, which collides with
+            # Python's bundled OpenSSL during Nuitka's dependency scan.
+            export OPENSSL_DIR="$(brew --prefix openssl@3)"
+            export OPENSSL_STATIC=1
+            test -f "$OPENSSL_DIR/lib/libssl.a"
+            test -f "$OPENSSL_DIR/lib/libcrypto.a"
+            # Environment changes do not invalidate uv's cached source wheels.
+            # Rebuild from the locked source without reusing a dynamic wheel.
+            uv sync --locked --group nuitka --no-cache \
+              --no-binary-package cryptography --reinstall-package cryptography
+          else
+            uv sync --locked --group nuitka
+          fi
           uv pip check
+
+      - name: Verify cryptography linkage before compilation
+        run: |
+          uv run --no-sync python - <<'PY'
+          import pathlib
+          import subprocess
+          from cryptography.hazmat.bindings import _rust
+          from cryptography.fernet import Fernet
+
+          extension = pathlib.Path(_rust.__file__).resolve()
+          result = subprocess.run(
+              ["otool", "-L", str(extension)],
+              check=True, capture_output=True, text=True,
+          )
+          print(result.stdout, flush=True)
+          dependencies = [line.strip().split(" (", 1)[0]
+                          for line in result.stdout.splitlines()[1:] if line.strip()]
+          dynamic_openssl = [path for path in dependencies
+                             if pathlib.PurePosixPath(path).name.startswith(("libssl.", "libcrypto."))]
+          if dynamic_openssl:
+              raise SystemExit(
+                  "cryptography still links external OpenSSL: "
+                  + ", ".join(dynamic_openssl)
+                  + ". Rebuild with OPENSSL_STATIC=1 and without the uv wheel cache."
+              )
+          cipher = Fernet(Fernet.generate_key())
+          message = b"Flowly Nuitka cryptography smoke test"
+          if cipher.decrypt(cipher.encrypt(message)) != message:
+              raise SystemExit("cryptography encryption round-trip failed")
+          print("cryptography uses bundled OpenSSL and passed the encryption smoke test.")
+          PY
 
       - name: Repair onnxruntime dylib layout for Nuitka
         # macOS wheels cannot carry symlinks, so libonnxruntime.<major>.dylib —
@@ -134,8 +181,9 @@ jobs:
                   print("linked", link, "->", base)
           PY
 
-      - name: Cache Nuitka ccache
-        uses: actions/cache@v4
+      - name: Restore Nuitka ccache
+        id: nuitka-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/Library/Caches/Nuitka
           key: nuitka-ccache-${{ matrix.arch }}-${{ hashFiles('uv.lock') }}
@@ -246,6 +294,15 @@ jobs:
               raise SystemExit(f"Wrong binary version; expected {expected}")
           subprocess.run([str(binary), "mcp", "--help"], check=True, env=env, timeout=60)
           PYTHON
+
+      - name: Save Nuitka ccache even after a build failure
+        # Dependency scanning happens after C compilation. Preserve that work
+        # when packaging fails instead of losing thousands of compiled files.
+        if: ${{ !cancelled() && steps.nuitka-cache.outputs.cache-hit != 'true' && steps.nuitka-cache.outputs.cache-primary-key != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/Library/Caches/Nuitka
+          key: ${{ steps.nuitka-cache.outputs.cache-primary-key }}
 
       - name: Upload compiler diagnostics
         if: always()
