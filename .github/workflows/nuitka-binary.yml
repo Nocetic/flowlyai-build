@@ -27,6 +27,10 @@ on:
         description: "Skip the Windows x64 build"
         type: boolean
         default: false
+      skip_macos:
+        description: "Skip the macOS ARM64 and Intel builds"
+        type: boolean
+        default: false
       skip_linux:
         description: "Skip the Linux x64/ARM64 builds"
         type: boolean
@@ -62,6 +66,9 @@ jobs:
 
   build:
     needs: resolve-source
+    # Manual platform-specific runs may skip macOS; tag pushes retain the
+    # complete release matrix.
+    if: github.event_name != 'workflow_dispatch' || inputs.skip_macos != true
     timeout-minutes: 360
     strategy:
       fail-fast: false
